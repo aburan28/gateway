@@ -1,0 +1,40 @@
+{{- if .Values.hub.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "traffic-harvester.fullname" . }}-hub
+  labels:
+    {{- include "traffic-harvester.hub.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["capturehubs"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["capturehubs/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["trafficcaptures"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["trafficcaptures/status"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "traffic-harvester.fullname" . }}-hub
+  labels:
+    {{- include "traffic-harvester.hub.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "traffic-harvester.fullname" . }}-hub
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "traffic-harvester.hub.serviceAccountName" . }}
+    namespace: {{ include "traffic-harvester.namespace" . }}
+{{- end }}
+

@@ -1,0 +1,52 @@
+{{- if .Values.spoke.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "traffic-harvester.fullname" . }}-spoke
+  labels:
+    {{- include "traffic-harvester.spoke.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["trafficcaptures"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["trafficcaptures/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["capturestorages"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["capture.gateway.io"]
+    resources: ["capturestorages/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["httproutes", "grpcroutes"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "traffic-harvester.fullname" . }}-spoke
+  labels:
+    {{- include "traffic-harvester.spoke.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "traffic-harvester.fullname" . }}-spoke
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "traffic-harvester.spoke.serviceAccountName" . }}
+    namespace: {{ include "traffic-harvester.namespace" . }}
+{{- end }}
+

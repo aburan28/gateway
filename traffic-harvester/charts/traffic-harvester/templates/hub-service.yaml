@@ -1,0 +1,19 @@
+{{- if .Values.hub.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "traffic-harvester.fullname" . }}-hub
+  namespace: {{ include "traffic-harvester.namespace" . }}
+  labels:
+    {{- include "traffic-harvester.hub.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.hub.service.type }}
+  ports:
+    - port: {{ .Values.hub.service.port }}
+      targetPort: grpc
+      protocol: TCP
+      name: grpc
+  selector:
+    {{- include "traffic-harvester.hub.selectorLabels" . | nindent 4 }}
+{{- end }}
+

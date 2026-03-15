@@ -1,0 +1,13 @@
+apiVersion: v2
+name: traffic-harvester
+description: A Kubernetes traffic capture controller using Gateway API RequestMirror
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - traffic
+  - capture
+  - gateway-api
+  - mirror
+  - observability
+

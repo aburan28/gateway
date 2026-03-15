@@ -1,0 +1,51 @@
+{{- if .Values.hub.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "traffic-harvester.fullname" . }}-hub
+  namespace: {{ include "traffic-harvester.namespace" . }}
+  labels:
+    {{- include "traffic-harvester.hub.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.hub.replicas }}
+  selector:
+    matchLabels:
+      {{- include "traffic-harvester.hub.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "traffic-harvester.hub.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "traffic-harvester.hub.serviceAccountName" . }}
+      containers:
+        - name: hub
+          image: "{{ .Values.hub.image.repository }}:{{ .Values.hub.image.tag }}"
+          imagePullPolicy: {{ .Values.hub.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: 9443
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.hub.resources | nindent 12 }}
+          {{- if .Values.hub.tls.secretName }}
+          volumeMounts:
+            - name: tls
+              mountPath: /etc/tls
+              readOnly: true
+          {{- end }}
+      {{- if .Values.hub.tls.secretName }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.hub.tls.secretName }}
+      {{- end }}
+      {{- with .Values.hub.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.hub.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+

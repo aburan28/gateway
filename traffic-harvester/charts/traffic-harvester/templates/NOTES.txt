@@ -1,0 +1,51 @@
+TrafficHarvester has been installed.
+
+{{- if .Values.hub.enabled }}
+Hub controller is deployed.
+  gRPC service: {{ include "traffic-harvester.fullname" . }}-hub.{{ include "traffic-harvester.namespace" . }}.svc:{{ .Values.hub.service.port }}
+{{- end }}
+
+{{- if .Values.spoke.enabled }}
+Spoke controller is deployed.
+{{- if .Values.spoke.hub.address }}
+  Connected to hub at: {{ .Values.spoke.hub.address }}
+{{- else }}
+  WARNING: No hub address configured. Set spoke.hub.address to connect to a hub.
+{{- end }}
+{{- end }}
+
+To create a traffic capture:
+
+  1. Create a CaptureStorage resource:
+     kubectl apply -f - <<EOF
+     apiVersion: capture.gateway.io/v1alpha1
+     kind: CaptureStorage
+     metadata:
+       name: my-storage
+     spec:
+       type: S3
+       s3:
+         bucket: my-bucket
+         region: us-east-1
+         credentialsSecretRef:
+           name: s3-creds
+     EOF
+
+  2. Create a TrafficCapture resource:
+     kubectl apply -f - <<EOF
+     apiVersion: capture.gateway.io/v1alpha1
+     kind: TrafficCapture
+     metadata:
+       name: my-capture
+     spec:
+       targetRef:
+         group: gateway.networking.k8s.io
+         kind: HTTPRoute
+         name: my-route
+       storageRef:
+         name: my-storage
+       capture:
+         includeHeaders: true
+         includeBody: true
+     EOF
+
