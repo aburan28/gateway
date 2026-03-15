@@ -1,0 +1,209 @@
+syntax = "proto3";
+
+package hub.v1;
+
+option go_package = "github.com/traffic-harvester/traffic-harvester/proto/hub/v1;hubv1";
+
+import "google/protobuf/timestamp.proto";
+
+// HubService defines the gRPC API between the hub and spoke controllers.
+service HubService {
+  // Spoke lifecycle
+  rpc RegisterSpoke(RegisterSpokeRequest) returns (RegisterSpokeResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc DeregisterSpoke(DeregisterSpokeRequest) returns (DeregisterSpokeResponse);
+
+  // Capture orchestration (hub → spoke directives via server-streaming)
+  rpc WatchDirectives(WatchDirectivesRequest) returns (stream WatchDirectivesResponse);
+
+  // Status reporting (spoke → hub)
+  rpc ReportCaptureStatus(ReportCaptureStatusRequest) returns (ReportCaptureStatusResponse);
+
+  // Query API (for dashboards / CLI tooling)
+  rpc ListCaptures(ListCapturesRequest) returns (ListCapturesResponse);
+  rpc GetCaptureStatus(GetCaptureStatusRequest) returns (GetCaptureStatusResponse);
+  rpc ListSpokes(ListSpokesRequest) returns (ListSpokesResponse);
+}
+
+// ─── Spoke lifecycle ────────────────────────────────────────────────────────
+
+message RegisterSpokeRequest {
+  string spoke_id = 1;
+  string cluster_name = 2;
+  string kubernetes_version = 3;
+  // Capabilities advertised by the spoke (e.g. supported storage backends).
+  repeated string capabilities = 4;
+}
+
+message RegisterSpokeResponse {
+  bool accepted = 1;
+  string message = 2;
+  // Interval (seconds) at which the spoke should send heartbeats.
+  int32 heartbeat_interval_seconds = 3;
+}
+
+message HeartbeatRequest {
+  string spoke_id = 1;
+  int32 active_captures = 2;
+  repeated CaptureStatusSummary capture_summaries = 3;
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
+
+message DeregisterSpokeRequest {
+  string spoke_id = 1;
+  string reason = 2;
+}
+
+message DeregisterSpokeResponse {
+  bool acknowledged = 1;
+}
+
+// ─── Capture orchestration ──────────────────────────────────────────────────
+
+message WatchDirectivesRequest {
+  string spoke_id = 1;
+}
+
+// CaptureDirective is a hub-initiated instruction sent to a spoke.
+enum DirectiveAction {
+  DIRECTIVE_ACTION_UNSPECIFIED = 0;
+  DIRECTIVE_ACTION_START = 1;
+  DIRECTIVE_ACTION_STOP = 2;
+  DIRECTIVE_ACTION_UPDATE = 3;
+}
+
+// WatchDirectivesResponse wraps a CaptureDirective for the streaming RPC.
+message WatchDirectivesResponse {
+  CaptureDirective directive = 1;
+}
+
+message CaptureDirective {
+  string directive_id = 1;
+  DirectiveAction action = 2;
+  string capture_name = 3;
+  string capture_namespace = 4;
+  // Serialised TrafficCapture spec for START / UPDATE directives.
+  CaptureSpec spec = 5;
+}
+
+message CaptureSpec {
+  string target_route_group = 1;
+  string target_route_kind = 2;
+  string target_route_name = 3;
+  string storage_ref_name = 4;
+  CaptureSettings capture_settings = 5;
+  CaptureFilters filters = 6;
+  AgentScaling agent_scaling = 7;
+}
+
+message CaptureSettings {
+  bool include_headers = 1;
+  bool include_body = 2;
+  int64 max_body_bytes = 3;
+  string duration = 4;
+}
+
+message CaptureFilters {
+  repeated HeaderMatch headers = 1;
+  string path_prefix = 2;
+  int32 percentage = 3;
+}
+
+message HeaderMatch {
+  string name = 1;
+  string value = 2;
+}
+
+message AgentScaling {
+  int32 replicas = 1;
+  int32 min_replicas = 2;
+  int32 max_replicas = 3;
+  int32 target_cpu = 4;
+}
+
+// ─── Status reporting ───────────────────────────────────────────────────────
+
+message CaptureStatusSummary {
+  string capture_name = 1;
+  string capture_namespace = 2;
+  CapturePhase phase = 3;
+  int64 captured_requests = 4;
+  int64 bytes_written = 5;
+  int32 ready_replicas = 6;
+  int32 desired_replicas = 7;
+}
+
+enum CapturePhase {
+  CAPTURE_PHASE_UNSPECIFIED = 0;
+  CAPTURE_PHASE_PENDING = 1;
+  CAPTURE_PHASE_ACTIVE = 2;
+  CAPTURE_PHASE_COMPLETED = 3;
+  CAPTURE_PHASE_FAILED = 4;
+}
+
+message ReportCaptureStatusRequest {
+  string spoke_id = 1;
+  repeated CaptureStatusSummary statuses = 2;
+}
+
+message ReportCaptureStatusResponse {
+  bool acknowledged = 1;
+}
+
+// ─── Query API ──────────────────────────────────────────────────────────────
+
+message ListCapturesRequest {
+  // Optional: filter by spoke.
+  string spoke_id = 1;
+  // Optional: filter by namespace.
+  string namespace = 2;
+}
+
+message CaptureInfo {
+  string capture_name = 1;
+  string capture_namespace = 2;
+  string spoke_id = 3;
+  CapturePhase phase = 4;
+  int64 captured_requests = 5;
+  int64 bytes_written = 6;
+  google.protobuf.Timestamp start_time = 7;
+}
+
+message ListCapturesResponse {
+  repeated CaptureInfo captures = 1;
+}
+
+message GetCaptureStatusRequest {
+  string capture_name = 1;
+  string capture_namespace = 2;
+  // If empty, returns aggregate across all spokes.
+  string spoke_id = 3;
+}
+
+message GetCaptureStatusResponse {
+  CaptureInfo capture = 1;
+}
+
+message ListSpokesRequest {}
+
+message SpokeInfo {
+  string spoke_id = 1;
+  string cluster_name = 2;
+  int32 active_captures = 3;
+  google.protobuf.Timestamp last_heartbeat = 4;
+  repeated string capabilities = 5;
+  SpokeState state = 6;
+}
+
+enum SpokeState {
+  SPOKE_STATE_UNSPECIFIED = 0;
+  SPOKE_STATE_CONNECTED = 1;
+  SPOKE_STATE_DISCONNECTED = 2;
+}
+
+message ListSpokesResponse {
+  repeated SpokeInfo spokes = 1;
+}
