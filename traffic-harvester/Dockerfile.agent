@@ -1,0 +1,12 @@
+FROM golang:1.25 AS builder
+
+WORKDIR /src
+COPY . .
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -o /out/traffic-harvester-agent ./cmd/capture-agent
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=builder /out/traffic-harvester-agent /traffic-harvester-agent
+ENTRYPOINT ["/traffic-harvester-agent"]
