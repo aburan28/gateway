@@ -1077,6 +1077,8 @@ type SecurityFeatures struct {
 type EnvoyExtensionFeatures struct {
 	// External Processing extensions
 	ExtProcs []ExtProc `json:"extProcs,omitempty" yaml:"extProcs,omitempty"`
+	// Proto message extraction extensions
+	ProtoMessageExtractions []ProtoMessageExtraction `json:"protoMessageExtractions,omitempty" yaml:"protoMessageExtractions,omitempty"`
 	// Wasm extensions
 	Wasms []Wasm `json:"wasms,omitempty" yaml:"wasms,omitempty"`
 	// Lua extensions
@@ -3306,6 +3308,8 @@ const (
 	ExtProcBodyBufferedPartial = ExtProcBodyProcessingMode(egv1a1.BufferedPartialExtBodyHeaderProcessingMode)
 	// ExtProcBodyFullDuplexStreamed sets the full duplex streamed processing mode
 	ExtProcBodyFullDuplexStreamed = ExtProcBodyProcessingMode(egv1a1.FullDuplexStreamedExtBodyProcessingMode)
+	// ExtProcBodyGRPC sets the gRPC body processing mode.
+	ExtProcBodyGRPC = ExtProcBodyProcessingMode(egv1a1.GRPCExtProcBodyProcessingMode)
 )
 
 // ExtProc holds the information associated with the ExtProc extensions.
@@ -3359,6 +3363,56 @@ type ExtProc struct {
 
 	// AllowModeOverride allows the external processor to modify the processing mode.
 	AllowModeOverride bool `json:"allowModeOverride,omitempty" yaml:"allowModeOverride,omitempty"`
+}
+
+// ProtoMessageExtractionMode defines how Envoy extracts messages for streaming RPCs.
+type ProtoMessageExtractionMode string
+
+const (
+	// ProtoMessageExtractionModeFirstAndLast extracts the first and last message
+	// for streaming request/response bodies.
+	ProtoMessageExtractionModeFirstAndLast = ProtoMessageExtractionMode(egv1a1.ProtoMessageExtractionModeFirstAndLast)
+)
+
+// ProtoMessageExtractionDirective defines how an individual protobuf field is extracted.
+type ProtoMessageExtractionDirective string
+
+const (
+	// ProtoMessageExtractionDirectiveExtract extracts the field value as-is.
+	ProtoMessageExtractionDirectiveExtract = ProtoMessageExtractionDirective(egv1a1.ProtoMessageExtractionDirectiveExtract)
+	// ProtoMessageExtractionDirectiveExtractRedact extracts the field shape but redacts message contents.
+	ProtoMessageExtractionDirectiveExtractRedact = ProtoMessageExtractionDirective(egv1a1.ProtoMessageExtractionDirectiveExtractRedact)
+	// ProtoMessageExtractionDirectiveExtractRepeatedCardinality extracts the number
+	// of elements in a repeated top-level response field.
+	ProtoMessageExtractionDirectiveExtractRepeatedCardinality = ProtoMessageExtractionDirective(egv1a1.ProtoMessageExtractionDirectiveExtractRepeatedCardinality)
+)
+
+// MethodExtraction defines the extraction directives for a single gRPC method.
+// +k8s:deepcopy-gen=true
+type MethodExtraction struct {
+	// RequestExtractionByField maps protobuf field paths in the request message
+	// to extraction directives.
+	RequestExtractionByField map[string]ProtoMessageExtractionDirective `json:"requestExtractionByField,omitempty" yaml:"requestExtractionByField,omitempty"`
+
+	// ResponseExtractionByField maps protobuf field paths in the response message
+	// to extraction directives.
+	ResponseExtractionByField map[string]ProtoMessageExtractionDirective `json:"responseExtractionByField,omitempty" yaml:"responseExtractionByField,omitempty"`
+}
+
+// ProtoMessageExtraction holds the information associated with proto message extraction extensions.
+// +k8s:deepcopy-gen=true
+type ProtoMessageExtraction struct {
+	// Name is a unique name for a proto message extraction configuration.
+	Name string `json:"name" yaml:"name"`
+
+	// DescriptorSet contains the compiled protobuf descriptor set used by Envoy.
+	DescriptorSet PrivateBytes `json:"descriptorSet,omitempty" yaml:"descriptorSet,omitempty"`
+
+	// Mode controls how Envoy extracts messages for streaming RPCs.
+	Mode *ProtoMessageExtractionMode `json:"mode,omitempty" yaml:"mode,omitempty"`
+
+	// ExtractionByMethod maps fully qualified gRPC methods to extraction directives.
+	ExtractionByMethod map[string]MethodExtraction `json:"extractionByMethod,omitempty" yaml:"extractionByMethod,omitempty"`
 }
 
 // Lua holds the information associated with Lua extensions

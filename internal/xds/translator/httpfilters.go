@@ -123,6 +123,8 @@ func newOrderedHTTPFilter(filter *hcmv3.HttpFilter) *OrderedHTTPFilter {
 		order = 10
 	case isFilterType(filter, egv1a1.EnvoyFilterBuffer):
 		order = 11
+	case isFilterType(filter, egv1a1.EnvoyFilterProtoMessageExtraction):
+		order = 90 + mustGetFilterIndex(filter.Name)
 	case isFilterType(filter, egv1a1.EnvoyFilterLua):
 		order = 12 + mustGetFilterIndex(filter.Name)
 	case isFilterType(filter, egv1a1.EnvoyFilterExtProc):

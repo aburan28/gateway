@@ -264,6 +264,7 @@ func translateExtProcBodyProcessingMode(mode *ir.ExtProcBodyProcessingMode) extp
 	lookup := map[ir.ExtProcBodyProcessingMode]extprocv3.ProcessingMode_BodySendMode{
 		ir.ExtProcBodyBuffered:           extprocv3.ProcessingMode_BUFFERED,
 		ir.ExtProcBodyBufferedPartial:    extprocv3.ProcessingMode_BUFFERED_PARTIAL,
+		ir.ExtProcBodyGRPC:               extprocv3.ProcessingMode_GRPC,
 		ir.ExtProcBodyStreamed:           extprocv3.ProcessingMode_STREAMED,
 		ir.ExtProcBodyFullDuplexStreamed: extprocv3.ProcessingMode_FULL_DUPLEX_STREAMED,
 	}

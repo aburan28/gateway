@@ -9,7 +9,7 @@ import (
 	gwapiv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
-// +kubebuilder:validation:Enum=Streamed;Buffered;BufferedPartial;FullDuplexStreamed
+// +kubebuilder:validation:Enum=Streamed;Buffered;BufferedPartial;FullDuplexStreamed;GRPC
 type ExtProcBodyProcessingMode string
 
 const (
@@ -22,6 +22,8 @@ const (
 	FullDuplexStreamedExtBodyProcessingMode ExtProcBodyProcessingMode = "FullDuplexStreamed"
 	// BufferedPartialExtBodyHeaderProcessingMode will buffer the message body in memory and send the entire body in one chunk. If the body exceeds the configured buffer limit, then the body contents up to the buffer limit will be sent.
 	BufferedPartialExtBodyHeaderProcessingMode ExtProcBodyProcessingMode = "BufferedPartial"
+	// GRPCExtProcBodyProcessingMode decodes gRPC payloads and forwards protobuf messages to the external processor.
+	GRPCExtProcBodyProcessingMode ExtProcBodyProcessingMode = "GRPC"
 )
 
 // ProcessingModeOptions defines if headers or body should be processed by the external service

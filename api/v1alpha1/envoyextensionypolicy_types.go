@@ -59,6 +59,13 @@ type EnvoyExtensionPolicySpec struct {
 	// +optional
 	ExtProc []ExtProc `json:"extProc,omitempty"`
 
+	// ProtoMessageExtraction is an ordered list of Envoy proto_message_extraction
+	// filters that should be added to the envoy filter chain.
+	//
+	// +kubebuilder:validation:MaxItems=16
+	// +optional
+	ProtoMessageExtraction []ProtoMessageExtraction `json:"protoMessageExtraction,omitempty"`
+
 	// Lua is an ordered list of Lua filters
 	// that should be added to the envoy filter chain
 	//

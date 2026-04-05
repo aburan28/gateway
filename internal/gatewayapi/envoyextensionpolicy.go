@@ -482,11 +482,12 @@ func (t *Translator) translateEnvoyExtensionPolicyForRoute(
 	resources *resource.Resources,
 ) error {
 	var (
-		wasms                                                 []ir.Wasm
-		luas                                                  []ir.Lua
-		wasmFailOpen, extProcFailOpen                         bool
-		wasmError, luaError, extProcError, dynamicModuleError error
-		errs                                                  error
+		wasms                                                                       []ir.Wasm
+		luas                                                                        []ir.Lua
+		protoMessageExtractions                                                     []ir.ProtoMessageExtraction
+		wasmFailOpen, extProcFailOpen                                               bool
+		wasmError, luaError, extProcError, dynamicModuleError, protoExtractionError error
+		errs                                                                        error
 	)
 
 	if wasms, wasmError, wasmFailOpen = t.buildWasms(policy, resources); wasmError != nil {
@@ -526,6 +527,10 @@ func (t *Translator) translateEnvoyExtensionPolicyForRoute(
 			dynamicModuleError = perr.WithMessage(dynamicModuleError, "DynamicModule")
 			errs = errors.Join(errs, dynamicModuleError)
 		}
+		if protoMessageExtractions, protoExtractionError = t.buildProtoMessageExtractions(policy); protoExtractionError != nil {
+			protoExtractionError = perr.WithMessage(protoExtractionError, "ProtoMessageExtraction")
+			errs = errors.Join(errs, protoExtractionError)
+		}
 
 		irKey := t.getIRKey(gtwCtx.Gateway)
 		for _, listener := range parentRefCtx.listeners {
@@ -560,6 +565,9 @@ func (t *Translator) translateEnvoyExtensionPolicyForRoute(
 						if dynamicModuleError != nil {
 							failRoute = true
 						}
+						if protoExtractionError != nil {
+							failRoute = true
+						}
 						if failRoute {
 							r.DirectResponse = &ir.CustomResponse{
 								StatusCode: ptr.To(uint32(500)),
@@ -567,10 +575,11 @@ func (t *Translator) translateEnvoyExtensionPolicyForRoute(
 							routesWithDirectResponse.Insert(r.Name)
 						} else {
 							r.EnvoyExtensions = &ir.EnvoyExtensionFeatures{
-								ExtProcs:       extProcs,
-								Wasms:          wasms,
-								Luas:           luas,
-								DynamicModules: dynamicModules,
+								ExtProcs:                extProcs,
+								ProtoMessageExtractions: protoMessageExtractions,
+								Wasms:                   wasms,
+								Luas:                    luas,
+								DynamicModules:          dynamicModules,
 							}
 						}
 					}
@@ -597,13 +606,14 @@ func (t *Translator) translateEnvoyExtensionPolicyForGateway(
 	resources *resource.Resources,
 ) error {
 	var (
-		extProcs                                              []ir.ExtProc
-		wasms                                                 []ir.Wasm
-		luas                                                  []ir.Lua
-		dynamicModules                                        []ir.DynamicModule
-		wasmFailOpen, extProcFailOpen                         bool
-		wasmError, luaError, extProcError, dynamicModuleError error
-		errs                                                  error
+		extProcs                                                                    []ir.ExtProc
+		wasms                                                                       []ir.Wasm
+		luas                                                                        []ir.Lua
+		dynamicModules                                                              []ir.DynamicModule
+		protoMessageExtractions                                                     []ir.ProtoMessageExtraction
+		wasmFailOpen, extProcFailOpen                                               bool
+		wasmError, luaError, extProcError, dynamicModuleError, protoExtractionError error
+		errs                                                                        error
 	)
 
 	if extProcs, extProcError, extProcFailOpen = t.buildExtProcs(policy, resources, gateway.envoyProxy); extProcError != nil {
@@ -621,6 +631,10 @@ func (t *Translator) translateEnvoyExtensionPolicyForGateway(
 	if dynamicModules, dynamicModuleError = t.buildDynamicModules(policy, gateway.envoyProxy); dynamicModuleError != nil {
 		dynamicModuleError = perr.WithMessage(dynamicModuleError, "DynamicModule")
 		errs = errors.Join(errs, dynamicModuleError)
+	}
+	if protoMessageExtractions, protoExtractionError = t.buildProtoMessageExtractions(policy); protoExtractionError != nil {
+		protoExtractionError = perr.WithMessage(protoExtractionError, "ProtoMessageExtraction")
+		errs = errors.Join(errs, protoExtractionError)
 	}
 
 	irKey := t.getIRKey(gateway.Gateway)
@@ -663,6 +677,9 @@ func (t *Translator) translateEnvoyExtensionPolicyForGateway(
 			if dynamicModuleError != nil {
 				failRoute = true
 			}
+			if protoExtractionError != nil {
+				failRoute = true
+			}
 			if failRoute {
 				r.DirectResponse = &ir.CustomResponse{
 					StatusCode: ptr.To(uint32(500)),
@@ -670,10 +687,11 @@ func (t *Translator) translateEnvoyExtensionPolicyForGateway(
 				routesWithDirectResponse.Insert(r.Name)
 			} else {
 				r.EnvoyExtensions = &ir.EnvoyExtensionFeatures{
-					ExtProcs:       extProcs,
-					Wasms:          wasms,
-					Luas:           luas,
-					DynamicModules: dynamicModules,
+					ExtProcs:                extProcs,
+					ProtoMessageExtractions: protoMessageExtractions,
+					Wasms:                   wasms,
+					Luas:                    luas,
+					DynamicModules:          dynamicModules,
 				}
 			}
 		}
@@ -741,6 +759,67 @@ func (t *Translator) buildLua(
 	}, nil
 }
 
+func (t *Translator) buildProtoMessageExtractions(
+	policy *egv1a1.EnvoyExtensionPolicy,
+) ([]ir.ProtoMessageExtraction, error) {
+	if policy == nil || len(policy.Spec.ProtoMessageExtraction) == 0 {
+		return nil, nil
+	}
+
+	pmIRList := make([]ir.ProtoMessageExtraction, 0, len(policy.Spec.ProtoMessageExtraction))
+	for idx, pm := range policy.Spec.ProtoMessageExtraction {
+		name := irConfigNameForProtoMessageExtraction(policy, idx)
+		pmIR, err := t.buildProtoMessageExtraction(name, policy, pm)
+		if err != nil {
+			return nil, err
+		}
+		pmIRList = append(pmIRList, *pmIR)
+	}
+
+	return pmIRList, nil
+}
+
+func (t *Translator) buildProtoMessageExtraction(
+	name string,
+	policy *egv1a1.EnvoyExtensionPolicy,
+	config egv1a1.ProtoMessageExtraction,
+) (*ir.ProtoMessageExtraction, error) {
+	descriptorSet, err := t.getProtoDescriptorSetFromRef(&config.DescriptorSetRef, policy.Namespace)
+	if err != nil {
+		return nil, err
+	}
+
+	pmIR := &ir.ProtoMessageExtraction{
+		Name:               name,
+		DescriptorSet:      descriptorSet,
+		ExtractionByMethod: make(map[string]ir.MethodExtraction, len(config.ExtractionByMethod)),
+	}
+
+	if config.Mode != nil {
+		mode := ir.ProtoMessageExtractionMode(*config.Mode)
+		pmIR.Mode = &mode
+	}
+
+	for method, extraction := range config.ExtractionByMethod {
+		methodExtraction := ir.MethodExtraction{}
+		if len(extraction.RequestExtractionByField) > 0 {
+			methodExtraction.RequestExtractionByField = make(map[string]ir.ProtoMessageExtractionDirective, len(extraction.RequestExtractionByField))
+			for fieldPath, directive := range extraction.RequestExtractionByField {
+				methodExtraction.RequestExtractionByField[fieldPath] = ir.ProtoMessageExtractionDirective(directive)
+			}
+		}
+		if len(extraction.ResponseExtractionByField) > 0 {
+			methodExtraction.ResponseExtractionByField = make(map[string]ir.ProtoMessageExtractionDirective, len(extraction.ResponseExtractionByField))
+			for fieldPath, directive := range extraction.ResponseExtractionByField {
+				methodExtraction.ResponseExtractionByField[fieldPath] = ir.ProtoMessageExtractionDirective(directive)
+			}
+		}
+		pmIR.ExtractionByMethod[method] = methodExtraction
+	}
+
+	return pmIR, nil
+}
+
 // getLuaBodyFromLocalObjectReference assumes the local object reference points to a Kubernetes ConfigMap
 func (t *Translator) getLuaBodyFromLocalObjectReference(
 	valueRef *gwapiv1.LocalObjectReference,
@@ -764,6 +843,41 @@ func (t *Translator) getLuaBodyFromLocalObjectReference(
 
 	} else {
 		return nil, fmt.Errorf("can't find the referenced configmap %s in namespace %s", valueRef.Name, policyNs)
+	}
+}
+
+func (t *Translator) getProtoDescriptorSetFromRef(
+	valueRef *egv1a1.LocalObjectKeyReference,
+	policyNs string,
+) (ir.PrivateBytes, error) {
+	if valueRef == nil {
+		return nil, errors.New("unexpected nil reference")
+	}
+
+	switch valueRef.Kind {
+	case resource.KindConfigMap:
+		cm := t.GetConfigMap(policyNs, string(valueRef.Name))
+		if cm == nil {
+			return nil, fmt.Errorf("can't find the referenced configmap %q in namespace %q", valueRef.Name, policyNs)
+		}
+		if b, ok := cm.BinaryData[valueRef.Key]; ok {
+			return ir.PrivateBytes(b), nil
+		}
+		if s, ok := cm.Data[valueRef.Key]; ok {
+			return ir.PrivateBytes(s), nil
+		}
+		return nil, fmt.Errorf("can't find the key %q in the referenced configmap %q", valueRef.Key, valueRef.Name)
+	case resource.KindSecret:
+		sec := t.GetSecret(policyNs, string(valueRef.Name))
+		if sec == nil {
+			return nil, fmt.Errorf("can't find the referenced secret %q in namespace %q", valueRef.Name, policyNs)
+		}
+		if b, ok := sec.Data[valueRef.Key]; ok {
+			return ir.PrivateBytes(b), nil
+		}
+		return nil, fmt.Errorf("can't find the key %q in the referenced secret %q", valueRef.Key, valueRef.Name)
+	default:
+		return nil, fmt.Errorf("unexpected reference to kind %q", valueRef.Kind)
 	}
 }
 
@@ -1123,6 +1237,13 @@ func hasTag(imageURL string) bool {
 func irConfigNameForWasm(policy client.Object, index int) string {
 	return fmt.Sprintf(
 		"%s/wasm/%s",
+		irConfigName(policy),
+		strconv.Itoa(index))
+}
+
+func irConfigNameForProtoMessageExtraction(policy client.Object, index int) string {
+	return fmt.Sprintf(
+		"%s/proto-message-extraction/%s",
 		irConfigName(policy),
 		strconv.Itoa(index))
 }
