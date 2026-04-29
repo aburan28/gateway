@@ -2955,6 +2955,33 @@ func TestBackendTrafficPolicyTarget(t *testing.T) {
 			},
 			wantErrors: []string{"either compression or compressor can be set, not both"},
 		},
+		{
+			desc: "duplicate decompressor types - should fail",
+			mutate: func(btp *egv1a1.BackendTrafficPolicy) {
+				btp.Spec = egv1a1.BackendTrafficPolicySpec{
+					PolicyTargetReferences: egv1a1.PolicyTargetReferences{
+						TargetRef: &gwapiv1.LocalPolicyTargetReferenceWithSectionName{
+							LocalPolicyTargetReference: gwapiv1.LocalPolicyTargetReference{
+								Group: "gateway.networking.k8s.io",
+								Kind:  "Gateway",
+								Name:  "eg",
+							},
+						},
+					},
+					Decompressor: []*egv1a1.Decompressor{
+						{
+							Type: egv1a1.GzipDecompressorType,
+							Gzip: &egv1a1.GzipDecompressor{},
+						},
+						{
+							Type: egv1a1.GzipDecompressorType,
+							Gzip: &egv1a1.GzipDecompressor{},
+						},
+					},
+				}
+			},
+			wantErrors: []string{"Duplicate value"},
+		},
 	}
 
 	for _, tc := range cases {

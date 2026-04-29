@@ -313,6 +313,10 @@ spec:
                   The decompressor config for the http streams.
                   This enables decompression of compressed requests from clients and/or compressed responses from backends.
                   Supports HTTP and gRPC traffic.
+
+                  At most one entry per decompressor type may be configured; duplicate
+                  type values are rejected at admission to prevent the xDS translator
+                  from emitting a route with conflicting per-filter configs.
                 items:
                   description: |-
                     Decompressor defines the config for enabling a decompressor.
@@ -358,7 +362,11 @@ spec:
                       must not be set.
                     rule: 'self.type == ''Zstd'' ? !has(self.gzip) && !has(self.brotli)
                       : true'
+                maxItems: 3
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               dns:
                 description: DNS includes dns resolution settings.
                 properties:

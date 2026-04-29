@@ -100,10 +100,17 @@ type BackendTrafficPolicySpec struct {
 	// This enables decompression of compressed requests from clients and/or compressed responses from backends.
 	// Supports HTTP and gRPC traffic.
 	//
+	// At most one entry per decompressor type may be configured; duplicate
+	// type values are rejected at admission to prevent the xDS translator
+	// from emitting a route with conflicting per-filter configs.
+	//
 	// +patchMergeKey=type
 	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=type
 	//
 	// +optional
+	// +kubebuilder:validation:MaxItems=3
 	Decompressor []*Decompressor `json:"decompressor,omitempty" patchMergeKey:"type" patchStrategy:"merge"`
 
 	// ResponseOverride defines the configuration to override specific responses with a custom one.
