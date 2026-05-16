@@ -759,3 +759,86 @@ func Test_ResourceLimitsAndPanicRecovery(t *testing.T) {
 		})
 	}
 }
+
+// Test_SandboxEscapes covers regressions of the gopher-lua/Lua 5.1 sandbox
+// escapes that recover the globals table after `_G = nil`, plus the
+// `string.rep` memory amplifier. Each case below was demonstrably exploitable
+// before the security.lua hardening that nulls getfenv/setfenv/coroutine and
+// bounds string.rep.
+func Test_SandboxEscapes(t *testing.T) {
+	tests := []struct {
+		name                 string
+		code                 string
+		expectedErrSubstring string
+	}{
+		{
+			name: "getfenv(0) must be unavailable (used to recover globals after _G=nil)",
+			code: `function envoy_on_request(request_handle)
+                     local g = getfenv(0)
+                     g.io.open("/etc/passwd", "r")
+                   end`,
+			expectedErrSubstring: "attempt to call a non-function object",
+		},
+		{
+			name: "getfenv(1) must be unavailable",
+			code: `function envoy_on_request(request_handle)
+                     local g = getfenv(1)
+                   end`,
+			expectedErrSubstring: "attempt to call a non-function object",
+		},
+		{
+			name: "setfenv must be unavailable",
+			code: `function envoy_on_request(request_handle)
+                     setfenv(1, {})
+                   end`,
+			expectedErrSubstring: "attempt to call a non-function object",
+		},
+		{
+			name: "coroutine library must be unavailable",
+			code: `function envoy_on_request(request_handle)
+                     coroutine.create(function() end)
+                   end`,
+			expectedErrSubstring: "attempt to index a non-table object",
+		},
+		{
+			name: "string.rep over the size cap must be rejected",
+			code: `function envoy_on_request(request_handle)
+                     local s = string.rep("A", 1024 * 1024 * 64)
+                   end`,
+			expectedErrSubstring: "string.rep result exceeds size limit",
+		},
+		{
+			name: "string.rep within the cap still works",
+			code: `function envoy_on_request(request_handle)
+                     local s = string.rep("A", 1024)
+                     request_handle:logInfo(#s)
+                   end`,
+			expectedErrSubstring: "",
+		},
+		{
+			name: "string.rep with separator over cap rejected",
+			code: `function envoy_on_request(request_handle)
+                     local s = string.rep("AB", 1024 * 1024, "==")
+                   end`,
+			expectedErrSubstring: "string.rep result exceeds size limit",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			l := NewLuaValidator(tt.code, nil)
+			err := l.Validate()
+			if tt.expectedErrSubstring == "" {
+				if err != nil {
+					t.Fatalf("expected no error, got: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tt.expectedErrSubstring)
+			}
+			if !strings.Contains(err.Error(), tt.expectedErrSubstring) {
+				t.Fatalf("expected substring %q in error, got: %v", tt.expectedErrSubstring, err)
+			}
+		})
+	}
+}

@@ -113,8 +113,41 @@ rawget = nil
 rawset = nil
 getmetatable = nil
 setmetatable = nil
+-- gopher-lua emulates Lua 5.1, which exposes getfenv/setfenv. Without nulling
+-- them, user code can recover the globals table after _G = nil via
+-- `getfenv(0)` and call back into io.*, os.*, etc.
+getfenv = nil
+setfenv = nil
+-- coroutine.* lets user code yield/resume across the executor, escaping the
+-- single-shot deadline used by the validator. It is not needed for any
+-- documented envoy_on_request/envoy_on_response surface.
+coroutine = nil
 -- Block access to global table to prevent _G["_unsafe_*"] bypasses
 _G = nil
+
+-- ============================================================================
+-- BOUNDED STRING OPERATIONS
+-- ============================================================================
+-- `string.rep(s, n)` and `string.format("%<n>s", x)` allocate proportional to
+-- a user-controlled count; the gopher-lua RegistryMaxSize bounds the Lua
+-- registry, not Go-heap allocations. Cap to a few MB so the validator can't
+-- be turned into an OOM amplifier for the controller pod.
+
+local _max_string_size = 1024 * 1024  -- 1 MiB
+
+do
+    local _unsafe_string_rep = string.rep
+    string.rep = function(s, n, sep)
+        if type(s) ~= "string" or type(n) ~= "number" then
+            return _unsafe_string_rep(s, n, sep)
+        end
+        local sep_len = (type(sep) == "string") and #sep or 0
+        if n < 0 or #s * n + sep_len * math.max(n - 1, 0) > _max_string_size then
+            error("string.rep result exceeds size limit (" .. _max_string_size .. " bytes)")
+        end
+        return _unsafe_string_rep(s, n, sep)
+    end
+end
 
 -- ============================================================================
 -- SANITIZED IO FUNCTIONS (path validation)
