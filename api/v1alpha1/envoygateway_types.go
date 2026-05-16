@@ -197,7 +197,47 @@ type XDSServer struct {
 	//
 	// +optional
 	MaxConnectionAgeGrace *gwapiv1.Duration `json:"maxConnectionAgeGrace,omitempty"`
+
+	// ClusterIdentityBinding controls how strictly Envoy Gateway requires
+	// an xDS client's mTLS identity (the SANs / CN of the presented client
+	// certificate) to match the `node.Cluster` value the client requests
+	// a snapshot for.
+	//
+	// In the default `Allow` mode every authenticated client may request
+	// any cluster's snapshot — this is the legacy behaviour and is safe
+	// when every Envoy proxy shares a single trust domain (single tenant).
+	//
+	// In `Require` mode the snapshot cache rejects any request whose
+	// `node.Cluster` is not represented in the client cert's URI SANs
+	// (preferred form: `spiffe://envoy-gateway/cluster/<ir-key>`) or DNS
+	// SANs (`cluster.<ir-key>.envoy-gateway`). Operators running multi-
+	// tenant deployments should issue per-cluster client certs and set
+	// this to `Require`. Note that this requires certificate plumbing
+	// that is not yet provided by the in-tree certgen — the binding is
+	// enforced if SANs are present in the expected form, but if your
+	// certgen has not been updated the request will be rejected and a
+	// clear error returned.
+	//
+	// +optional
+	// +kubebuilder:default=Allow
+	ClusterIdentityBinding *ClusterIdentityBindingMode `json:"clusterIdentityBinding,omitempty"`
 }
+
+// ClusterIdentityBindingMode names a policy for binding the requested xDS
+// `node.Cluster` to the connecting client's mTLS identity.
+// +kubebuilder:validation:Enum=Allow;Require
+type ClusterIdentityBindingMode string
+
+const (
+	// ClusterIdentityBindingAllow accepts any authenticated client's
+	// request for any cluster's snapshot. Default; matches pre-existing
+	// behaviour.
+	ClusterIdentityBindingAllow ClusterIdentityBindingMode = "Allow"
+	// ClusterIdentityBindingRequire rejects requests whose node.Cluster
+	// does not appear in the client certificate's SAN list. Recommended
+	// for multi-tenant deployments.
+	ClusterIdentityBindingRequire ClusterIdentityBindingMode = "Require"
+)
 
 // LeaderElection defines the desired leader election settings.
 type LeaderElection struct {

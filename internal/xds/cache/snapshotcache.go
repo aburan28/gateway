@@ -15,6 +15,7 @@ package cache
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"math"
 	"strconv"
@@ -28,9 +29,12 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/peer"
 
 	"github.com/envoyproxy/gateway/internal/logging"
 	"github.com/envoyproxy/gateway/internal/metrics"
+	"github.com/envoyproxy/gateway/internal/xds/server/clusteridentity"
 	"github.com/envoyproxy/gateway/internal/xds/types"
 )
 
@@ -64,9 +68,19 @@ type nodeFrequencyMap map[string]int
 
 type streamDurationMap map[int64]time.Time
 
+// streamPeerInfo carries the per-stream client identity captured at
+// connection time so OnStreamRequest can enforce cluster-cert binding
+// without having to re-extract from peer info on every request.
+type streamPeerInfo struct {
+	peerCerts []*x509.Certificate
+}
+
+type streamPeerInfoMap map[int64]streamPeerInfo
+
 type snapshotCache struct {
 	cachev3.SnapshotCache
 	streamIDNodeInfo    nodeInfoMap
+	streamIDPeerInfo    streamPeerInfoMap
 	nodeFrequency       nodeFrequencyMap
 	streamDuration      streamDurationMap
 	deltaStreamDuration streamDurationMap
@@ -74,6 +88,7 @@ type snapshotCache struct {
 	lastSnapshot        snapshotMap
 	log                 *zap.SugaredLogger
 	mu                  sync.Mutex
+	identityValidator   *clusteridentity.Validator
 }
 
 // GenerateNewSnapshot takes a table of resources (the output from the IR->xDS
@@ -140,7 +155,12 @@ func (s *snapshotCache) newSnapshotVersion() string {
 // NewSnapshotCache gives you a fresh SnapshotCache.
 // It needs a logger that supports the go-control-plane
 // required interface (Debugf, Infof, Warnf, and Errorf).
-func NewSnapshotCache(ads bool, logger logging.Logger) SnapshotCacheWithCallbacks {
+//
+// identityValidator binds each xDS DiscoveryRequest's node.Cluster to the
+// authenticated identity of the connecting client (the SANs of the
+// presented mTLS client cert). Pass nil or a validator built with
+// clusteridentity.ModeAllow to preserve the legacy any-cluster behaviour.
+func NewSnapshotCache(ads bool, logger logging.Logger, identityValidator *clusteridentity.Validator) SnapshotCacheWithCallbacks {
 	// Set up the nasty wrapper hack.
 	wrappedLogger := logger.Sugar()
 	return &snapshotCache{
@@ -148,10 +168,33 @@ func NewSnapshotCache(ads bool, logger logging.Logger) SnapshotCacheWithCallback
 		log:                 wrappedLogger,
 		lastSnapshot:        make(snapshotMap),
 		streamIDNodeInfo:    make(nodeInfoMap),
+		streamIDPeerInfo:    make(streamPeerInfoMap),
 		nodeFrequency:       make(nodeFrequencyMap),
 		streamDuration:      make(streamDurationMap),
 		deltaStreamDuration: make(streamDurationMap),
+		identityValidator:   identityValidator,
 	}
+}
+
+// extractPeerCerts pulls the client-presented x509 chain off a gRPC
+// connection's context, if any. Returns nil for non-mTLS streams; the
+// validator handles that case according to its policy.
+func extractPeerCerts(ctx context.Context) []*x509.Certificate {
+	p, ok := peer.FromContext(ctx)
+	if !ok || p == nil || p.AuthInfo == nil {
+		return nil
+	}
+	tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo)
+	if !ok {
+		return nil
+	}
+	state := tlsInfo.State
+	// Belt-and-suspenders: skip surfacing PeerCertificates for streams
+	// where the handshake didn't actually complete.
+	if !state.HandshakeComplete {
+		return nil
+	}
+	return state.PeerCertificates
 }
 
 // getNodeIDs retrieves the node ids from the node info map whose
@@ -169,12 +212,16 @@ func (s *snapshotCache) getNodeIDs(irKey string) []string {
 
 // OnStreamOpen and the other OnStream* functions implement the callbacks for the
 // state-of-the-world stream types.
-func (s *snapshotCache) OnStreamOpen(_ context.Context, streamID int64, _ string) error {
+func (s *snapshotCache) OnStreamOpen(ctx context.Context, streamID int64, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.streamIDNodeInfo[streamID] = nil
 	s.streamDuration[streamID] = time.Now()
+	// Capture the mTLS peer cert chain at stream-open time. The chain
+	// stays the same for the lifetime of the stream, so we don't have to
+	// re-extract on every DiscoveryRequest.
+	s.streamIDPeerInfo[streamID] = streamPeerInfo{peerCerts: extractPeerCerts(ctx)}
 
 	return nil
 }
@@ -194,6 +241,7 @@ func (s *snapshotCache) OnStreamClosed(streamID int64, node *corev3.Node) {
 	}
 
 	delete(s.streamIDNodeInfo, streamID)
+	delete(s.streamIDPeerInfo, streamID)
 	delete(s.streamDuration, streamID)
 
 	s.nodeFrequency[node.Id] -= 1
@@ -225,6 +273,15 @@ func (s *snapshotCache) OnStreamRequest(streamID int64, req *discoveryv3.Discove
 	}
 	nodeID := s.streamIDNodeInfo[streamID].Id
 	cluster := s.streamIDNodeInfo[streamID].Cluster
+
+	// Enforce cluster-cert identity binding. In Allow mode this is a
+	// no-op; in Require mode the connecting client's mTLS SANs must
+	// permit access to the requested node.Cluster. Reject before any
+	// snapshot bytes are surfaced to the stream.
+	if err := s.identityValidator.Validate(s.streamIDPeerInfo[streamID].peerCerts, cluster); err != nil {
+		s.log.Errorf("rejecting xDS request on stream %d: nodeID=%s cluster=%s: %v", streamID, nodeID, cluster, err)
+		return err
+	}
 
 	var nodeVersion string
 
@@ -286,12 +343,13 @@ func (s *snapshotCache) OnStreamResponse(_ context.Context, streamID int64, _ *d
 // OnDeltaStreamOpen and the other OnDeltaStream*/OnStreamDelta* functions implement
 // the callbacks for the incremental xDS versions.
 // Yes, the different ordering in the name is part of the go-control-plane interface.
-func (s *snapshotCache) OnDeltaStreamOpen(_ context.Context, streamID int64, _ string) error {
+func (s *snapshotCache) OnDeltaStreamOpen(ctx context.Context, streamID int64, _ string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Ensure that we're adding the streamID to the Node ID list.
 	s.streamIDNodeInfo[streamID] = nil
+	s.streamIDPeerInfo[streamID] = streamPeerInfo{peerCerts: extractPeerCerts(ctx)}
 	s.deltaStreamDuration[streamID] = time.Now()
 
 	return nil
@@ -312,6 +370,7 @@ func (s *snapshotCache) OnDeltaStreamClosed(streamID int64, node *corev3.Node) {
 	}
 
 	delete(s.streamIDNodeInfo, streamID)
+	delete(s.streamIDPeerInfo, streamID)
 	delete(s.deltaStreamDuration, streamID)
 
 	s.nodeFrequency[node.Id] -= 1
@@ -348,6 +407,12 @@ func (s *snapshotCache) OnStreamDeltaRequest(streamID int64, req *discoveryv3.De
 	}
 	nodeID := s.streamIDNodeInfo[streamID].Id
 	cluster := s.streamIDNodeInfo[streamID].Cluster
+
+	// Enforce cluster-cert identity binding (delta variant).
+	if err := s.identityValidator.Validate(s.streamIDPeerInfo[streamID].peerCerts, cluster); err != nil {
+		s.log.Errorf("rejecting delta xDS request on stream %d: nodeID=%s cluster=%s: %v", streamID, nodeID, cluster, err)
+		return err
+	}
 
 	// If no snapshot has been written into the snapshotCache yet, we can't do anything, so don't mess with
 	// this request. go-control-plane will respond with an empty response, then send an update when a

@@ -40,6 +40,7 @@ import (
 	"github.com/envoyproxy/gateway/internal/message"
 	"github.com/envoyproxy/gateway/internal/xds/bootstrap"
 	"github.com/envoyproxy/gateway/internal/xds/cache"
+	"github.com/envoyproxy/gateway/internal/xds/server/clusteridentity"
 	"github.com/envoyproxy/gateway/internal/xds/server/kubejwt"
 	"github.com/envoyproxy/gateway/internal/xds/translator"
 )
@@ -150,7 +151,7 @@ func (r *Runner) Close() error { return nil }
 // Start starts the xds-server runner
 func (r *Runner) Start(ctx context.Context) error {
 	r.Logger = r.Logger.WithName(r.Name()).WithValues("runner", r.Name())
-	r.cache = cache.NewSnapshotCache(true, r.Logger)
+	r.cache = cache.NewSnapshotCache(true, r.Logger, clusterIdentityValidator(r.EnvoyGateway))
 
 	// Set up the gRPC server and register the xDS handler.
 	// Create SnapshotCache before start subscribeAndTranslate,
@@ -430,4 +431,16 @@ func (r *Runner) loadTLSConfig() (*tls.Config, error) {
 		return nil, fmt.Errorf("failed to create tls config: %w", err)
 	}
 	return tlsConfig, err
+}
+
+// clusterIdentityValidator constructs a clusteridentity.Validator from
+// the EnvoyGateway.XDSServer.ClusterIdentityBinding setting. A nil or
+// missing setting defaults to Allow (legacy single-tenant behaviour).
+func clusterIdentityValidator(eg *egv1a1.EnvoyGateway) *clusteridentity.Validator {
+	mode := clusteridentity.ModeAllow
+	if eg != nil && eg.XDSServer != nil && eg.XDSServer.ClusterIdentityBinding != nil &&
+		*eg.XDSServer.ClusterIdentityBinding == egv1a1.ClusterIdentityBindingRequire {
+		mode = clusteridentity.ModeRequire
+	}
+	return clusteridentity.New(mode)
 }
