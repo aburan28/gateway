@@ -1,0 +1,340 @@
+diff --git a/pkg/config/config.go b/pkg/config/config.go
+index c179f33..bcadbdf 100644
+--- a/pkg/config/config.go
++++ b/pkg/config/config.go
+@@ -56,6 +56,13 @@ type Common struct {
+ 		// Specifies the duration in which exp (Expiry) and nbf (Not Before)
+ 		// claims may differ by. This value should be positive.
+ 		AcceptableTimeSkewSeconds int `json:"acceptable_time_skew_seconds"`
++		// AllowedIssuers is the list of JWT issuers (the `iss` claim) that the
++		// authorizer will accept. The issuer is checked BEFORE any network call
++		// to fetch JWKS, so an attacker cannot use an unverified `iss` to
++		// pivot to internal HTTP endpoints (SSRF) or to spoof an identity by
++		// hosting their own JWKS. When the list is empty, JWT identities are
++		// rejected.
++		AllowedIssuers []string `json:"allowed_issuers"`
+ 	} `json:"jwt"`
+ 
+ 	// Directory configuration
+diff --git a/pkg/config/schema/config.yaml b/pkg/config/schema/config.yaml
+index ef16742..92ecdb8 100644
+--- a/pkg/config/schema/config.yaml
++++ b/pkg/config/schema/config.yaml
+@@ -39,10 +39,13 @@ jwt:
+   acceptable_time_skew_seconds: 5 # set as default, 5 secs
+ 
+ # authentication configuration
++#
++# Generate API keys with: openssl rand -hex 32
++# Do NOT use the placeholder strings below in production.
+ auth:
+-  keys:
+-    - "69ba614c64ed4be69485de73d062a00b"
+-    - "##Ve@rySecret123!!"
++  keys: []
++    # - "<API key 1>"
++    # - "<API key 2>"
+   options:
+     default:
+       enable_api_key: true
+diff --git a/pkg/config/topaz_config.go b/pkg/config/topaz_config.go
+index 210dffb..8b9e365 100644
+--- a/pkg/config/topaz_config.go
++++ b/pkg/config/topaz_config.go
+@@ -102,10 +102,20 @@ func (c *Config) validation() error {
+ 	setDefaultCallsAuthz(c)
+ 	c.Auth.transposeKeys()
+ 
+-	if len(c.Auth.APIKeys) > 0 {
++	switch {
++	case len(c.Auth.APIKeys) > 0:
+ 		c.Auth.Options.Default.EnableAPIKey = true
+-	} else {
+-		c.Auth.Options.Default.EnableAnonymous = true
++	case c.Auth.Options.Default.EnableAnonymous:
++		// Operator has explicitly opted in to anonymous access.
++		log.Warn().Msg("auth: anonymous access enabled — every API caller is unauthenticated")
++	default:
++		// Fail closed: an authorization service must not silently turn anonymous
++		// when an operator forgets to configure keys. Require an explicit choice.
++		return errors.New(
++			"auth: no api keys configured and auth.options.default.enable_anonymous is not set; " +
++				"refusing to start. Set auth.keys to a list of API keys, or explicitly set " +
++				"auth.options.default.enable_anonymous: true to allow unauthenticated access.",
++		)
+ 	}
+ 
+ 	return nil
+diff --git a/topazd/app/handlers/authorizer.go b/topazd/app/handlers/authorizer.go
+index ff3439f..32629fa 100644
+--- a/topazd/app/handlers/authorizer.go
++++ b/topazd/app/handlers/authorizer.go
+@@ -5,8 +5,8 @@ import (
+ 	"net/http"
+ )
+ 
+-func AuthorizersHandler(confServices *TopazCfg) func(w http.ResponseWriter, r *http.Request) {
+-	return func(w http.ResponseWriter, r *http.Request) {
++func AuthorizersHandler(confServices *TopazCfg) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		type AuthorizerInstance struct {
+ 			Name   string `json:"name"`
+ 			URL    string `json:"url"`
+@@ -17,11 +17,20 @@ func AuthorizersHandler(confServices *TopazCfg) func(w http.ResponseWriter, r *h
+ 			Results []AuthorizerInstance `json:"results"`
+ 		}
+ 
++		// Only return the configured API key to authenticated callers. The
++		// endpoint used to echo the key unconditionally, which let anyone who
++		// could reach the console gateway port walk away with valid credentials
++		// for the authorizer service.
++		apiKey := ""
++		if authenticatedUser, ok := getValueFromCtx[bool](r.Context(), AuthenticatedUser); ok && authenticatedUser {
++			apiKey = confServices.AuthorizerAPIKey
++		}
++
+ 		cfg := &authorizersResult{
+-			Results: []AuthorizerInstance{{URL: confServices.AuthorizerServiceURL, Name: "authorizer", APIKey: confServices.AuthorizerAPIKey}},
++			Results: []AuthorizerInstance{{URL: confServices.AuthorizerServiceURL, Name: "authorizer", APIKey: apiKey}},
+ 		}
+ 
+ 		buf, _ := json.Marshal(cfg)
+ 		writeJSON(buf, w, r)
+-	}
++	})
+ }
+diff --git a/topazd/app/topaz.go b/topazd/app/topaz.go
+index 88689b4..ce50071 100644
+--- a/topazd/app/topaz.go
++++ b/topazd/app/topaz.go
+@@ -202,7 +202,7 @@ func (e *Topaz) ConfigServices() error {
+ 
+ 					// config service.
+ 					server.Gateway.Mux.Handle("/api/v2/config", apiKeyAuthMiddleware.ConfigAuth(handlers.ConfigHandlerV2(consoleConfig), e.Configuration.Auth))
+-					server.Gateway.Mux.HandleFunc("/api/v1/authorizers", handlers.AuthorizersHandler(consoleConfig))
++					server.Gateway.Mux.Handle("/api/v1/authorizers", apiKeyAuthMiddleware.ConfigAuth(handlers.AuthorizersHandler(consoleConfig), e.Configuration.Auth))
+ 					// console service. depends on config service.
+ 					server.Gateway.Mux.Handle("/ui/", handlers.UIHandler(http.FS(console.FS)))
+ 					server.Gateway.Mux.Handle("/assets/", handlers.UIHandler(http.FS(console.FS)))
+diff --git a/topazd/authorizer/impl/jwt.go b/topazd/authorizer/impl/jwt.go
+index b6b5042..ee1f83c 100644
+--- a/topazd/authorizer/impl/jwt.go
++++ b/topazd/authorizer/impl/jwt.go
+@@ -4,9 +4,11 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"fmt"
++	"net"
+ 	"net/http"
+ 	"net/url"
+ 	"path"
++	"strings"
+ 	"time"
+ 
+ 	"github.com/aserto-dev/go-authorizer/aserto/authorizer/v2/api"
+@@ -24,7 +26,16 @@ import (
+ 	"google.golang.org/protobuf/proto"
+ )
+ 
+-const jwtMinRefreshInterval = 15 * time.Minute
++const (
++	jwtMinRefreshInterval = 15 * time.Minute
++	jwksFetchTimeout      = 10 * time.Second
++	jwksMaxResponseBytes  = 256 * 1024
++)
++
++// ErrIssuerNotAllowed is returned when a JWT's `iss` claim is not in the
++// configured allow-list. We do not perform any network call (e.g. JWKS
++// fetch) until this check has passed.
++var ErrIssuerNotAllowed = aerr.ErrAuthenticationFailed.Msg("jwt issuer not allowed")
+ 
+ var (
+ 	// ErrMissingMetadata - metadata element missing.
+@@ -62,6 +73,15 @@ func (s *AuthorizerServer) getIdentityFromJWT(ctx context.Context, bearerJWT str
+ 		return "", err
+ 	}
+ 
++	// Reject unknown issuers before any network call. Without this check, a
++	// caller-supplied JWT could (a) cause the authorizer to issue HTTP requests
++	// to an attacker-chosen host (SSRF) and (b) spoof any identity once the
++	// attacker-controlled JWKS is trusted.
++	if err := s.validateIssuer(jwtTemp.Issuer()); err != nil {
++		log.Warn().Str("issuer", jwtTemp.Issuer()).Msg("rejected jwt with disallowed issuer")
++		return "", err
++	}
++
+ 	options, err := s.jwtParseStringOptions(ctx, jwtTemp)
+ 	if err != nil {
+ 		return "", err
+@@ -141,7 +161,100 @@ func (s *AuthorizerServer) jwksURLFromCache(ctx context.Context, issuer string)
+ 	return jwksURL, nil
+ }
+ 
+-// jwksURL.
++// validateIssuer enforces that the JWT issuer is in the configured allow-list.
++// The list is compared as exact-match strings on the canonical issuer claim.
++func (s *AuthorizerServer) validateIssuer(issuer string) error {
++	if issuer == "" {
++		return ErrIssuerNotAllowed
++	}
++
++	allowed := s.cfg.JWT.AllowedIssuers
++	if len(allowed) == 0 {
++		// Empty allow-list = JWT identities disabled. Fail closed.
++		return ErrIssuerNotAllowed
++	}
++
++	for _, a := range allowed {
++		if a == issuer {
++			return nil
++		}
++	}
++
++	return ErrIssuerNotAllowed
++}
++
++// safeJWKSClient returns an HTTP client suitable for fetching well-known
++// metadata and JWK sets. It enforces a request timeout, refuses redirects to
++// hosts that resolve only to private/loopback/link-local IPs, and rejects
++// non-HTTPS schemes on every redirect hop.
++func safeJWKSClient() *http.Client {
++	dialer := &net.Dialer{Timeout: jwksFetchTimeout}
++
++	transport := &http.Transport{
++		// DialContext enforces address-based filtering at connect time as a
++		// last line of defense against DNS rebinding.
++		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
++			host, port, err := net.SplitHostPort(addr)
++			if err != nil {
++				return nil, err
++			}
++
++			ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
++			if err != nil {
++				return nil, err
++			}
++
++			for _, ip := range ips {
++				if isPrivateOrLocalIP(ip) {
++					return nil, fmt.Errorf("refusing to connect to non-public address %s", ip.String())
++				}
++			}
++
++			return dialer.DialContext(ctx, network, net.JoinHostPort(host, port))
++		},
++	}
++
++	return &http.Client{
++		Timeout:   jwksFetchTimeout,
++		Transport: transport,
++		CheckRedirect: func(req *http.Request, via []*http.Request) error {
++			if len(via) >= 3 {
++				return errors.New("too many redirects")
++			}
++
++			if !strings.EqualFold(req.URL.Scheme, "https") {
++				return fmt.Errorf("refusing redirect to non-https scheme %q", req.URL.Scheme)
++			}
++
++			return nil
++		},
++	}
++}
++
++// isPrivateOrLocalIP returns true if the address is loopback, link-local,
++// multicast, unspecified, or in a private range (RFC 1918, RFC 4193).
++func isPrivateOrLocalIP(ip net.IP) bool {
++	if ip == nil {
++		return true
++	}
++
++	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
++		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
++		return true
++	}
++
++	if ip.IsPrivate() {
++		return true
++	}
++
++	return false
++}
++
++// jwksURL discovers the JWKS endpoint for an issuer. The issuer string has
++// already been allow-listed by validateIssuer; the function additionally
++// enforces https-only, rejects private/loopback hosts, and refuses to follow
++// a `jwks_uri` returned by .well-known/openid-configuration whose host
++// differs from the issuer's host.
+ func (s *AuthorizerServer) jwksURL(ctx context.Context, baseURL string) (*url.URL, error) {
+ 	const (
+ 		wellknownConfig = `.well-known/openid-configuration`
+@@ -153,11 +266,16 @@ func (s *AuthorizerServer) jwksURL(ctx context.Context, baseURL string) (*url.UR
+ 		return nil, err
+ 	}
+ 
+-	if u.Scheme == "" {
+-		return nil, errors.New("no scheme defined for baseURL")
++	if !strings.EqualFold(u.Scheme, "https") {
++		return nil, errors.Errorf("issuer must use https scheme, got %q", u.Scheme)
++	}
++
++	if u.Host == "" {
++		return nil, errors.New("issuer has no host")
+ 	}
+ 
+ 	originalPath := u.Path
++	issuerHost := u.Host
+ 	u.Path = path.Join(originalPath, wellknownConfig)
+ 
+ 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
+@@ -165,23 +283,43 @@ func (s *AuthorizerServer) jwksURL(ctx context.Context, baseURL string) (*url.UR
+ 		return nil, err
+ 	}
+ 
+-	client := &http.Client{}
++	client := safeJWKSClient()
+ 
+ 	resp, err := client.Do(req)
+ 	if err == nil {
+ 		defer func() { _ = resp.Body.Close() }()
+ 
+-		var config struct {
+-			URI string `json:"jwks_uri"`
+-		}
++		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
++			var config struct {
++				URI string `json:"jwks_uri"`
++			}
+ 
+-		if err := json.NewDecoder(resp.Body).Decode(&config); err == nil {
+-			if u, err = url.Parse(config.URI); err == nil {
+-				return u, nil
++			limited := http.MaxBytesReader(nil, resp.Body, jwksMaxResponseBytes)
++
++			if err := json.NewDecoder(limited).Decode(&config); err == nil {
++				if discovered, err := url.Parse(config.URI); err == nil {
++					if !strings.EqualFold(discovered.Scheme, "https") {
++						return nil, errors.Errorf("discovered jwks_uri must use https, got %q", discovered.Scheme)
++					}
++
++					// The well-known endpoint trusted the issuer; pin the
++					// discovered URI to the same host so a compromised
++					// endpoint can't redirect us elsewhere.
++					if !strings.EqualFold(discovered.Host, issuerHost) {
++						return nil, errors.Errorf(
++							"discovered jwks_uri host %q does not match issuer host %q",
++							discovered.Host, issuerHost,
++						)
++					}
++
++					return discovered, nil
++				}
+ 			}
+ 		}
+ 	}
+ 
++	// Fall back to issuer/.well-known/jwks.json. The issuer URL has already
++	// been allow-listed and verified to be https.
+ 	u.Path = path.Join(originalPath, wellknownJWKS)
+ 
+ 	return u, nil
