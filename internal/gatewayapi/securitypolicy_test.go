@@ -865,6 +865,70 @@ func TestTranslatorFetchEndpointsFromIssuerCacheError(t *testing.T) {
 	require.Equal(t, int32(1), callCount.Load(), "subsequent fetch should continue using cached error")
 }
 
+// TestTranslatorFetchEndpointsFromIssuerSSRF asserts that OIDC issuer URLs
+// resolving to an SSRF-denied address (loopback when not in test mode, or
+// link-local / IMDS always) are rejected before any TCP connect, with the
+// failure cached so retries do not amplify the probe.
+func TestTranslatorFetchEndpointsFromIssuerSSRF(t *testing.T) {
+	// Temporarily disable the test-mode loopback exception so we can
+	// observe the production guard rejecting 127.0.0.1. Other tests in
+	// this suite rely on the exception, so restore it before returning.
+	oidcAllowLoopbackForTests = false
+	defer EnableOIDCLoopbackForTesting()
+
+	tr := &Translator{GatewayControllerName: "gateway.envoyproxy.io/gatewayclass-controller"}
+	tr.oidcDiscoveryCache = newOIDCDiscoveryCache()
+
+	for _, issuer := range []string{
+		"http://127.0.0.1:12345",
+		"http://169.254.169.254", // AWS / GCE instance metadata
+		"http://[::1]:12345",
+		"http://[fe80::1]",
+	} {
+		t.Run(issuer, func(t *testing.T) {
+			cfg, err := tr.fetchEndpointsFromIssuer(issuer, nil)
+			require.Error(t, err)
+			require.Nil(t, cfg)
+		})
+	}
+}
+
+// TestTranslatorFetchEndpointsFromIssuerBodyTooLarge asserts that an OIDC
+// issuer returning a response larger than maxOIDCDiscoveryBodySize is
+// rejected without OOMing the controller.
+func TestTranslatorFetchEndpointsFromIssuerBodyTooLarge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/.well-known/openid-configuration" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		// Stream maxOIDCDiscoveryBodySize+1 bytes of JSON-ish padding so
+		// the response exceeds the cap. The leading `{` keeps it parseable
+		// up to that point; the body should still be rejected on size.
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"token_endpoint":"x","authorization_endpoint":"y","_pad":"`))
+		pad := make([]byte, 1024)
+		for i := range pad {
+			pad[i] = 'A'
+		}
+		for written := int64(0); written <= maxOIDCDiscoveryBodySize; written += int64(len(pad)) {
+			if _, err := w.Write(pad); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	tr := &Translator{GatewayControllerName: "gateway.envoyproxy.io/gatewayclass-controller"}
+	tr.oidcDiscoveryCache = newOIDCDiscoveryCache()
+
+	cfg, err := tr.fetchEndpointsFromIssuer(server.URL, nil)
+	require.Error(t, err)
+	require.Nil(t, cfg)
+	require.Contains(t, err.Error(), "exceeds")
+}
+
 // / tiny helper to build a minimal SecurityPolicy
 func sp(ns, name string) *egv1a1.SecurityPolicy {
 	return &egv1a1.SecurityPolicy{

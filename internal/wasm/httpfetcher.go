@@ -33,6 +33,7 @@ import (
 	"github.com/cenkalti/backoff/v4"
 
 	"github.com/envoyproxy/gateway/internal/logging"
+	"github.com/envoyproxy/gateway/internal/utils/safehttp"
 )
 
 // Default values for ExponentialBackOff.
@@ -58,25 +59,59 @@ type HTTPFetcher struct {
 	logger          logging.Logger
 }
 
+// allowLoopbackForTests is flipped to true by tests via the
+// EnableLoopbackForTesting helper so the SSRF guard permits the localhost
+// httptest servers they spin up. Production code must never call the helper.
+var allowLoopbackForTests bool
+
+// EnableLoopbackForTesting permits the wasm HTTP fetcher to dial loopback
+// addresses (127.0.0.0/8, ::1). Intended ONLY for use by tests in this
+// package and adjacent packages that exercise the fetcher against
+// httptest.NewServer. The function name is intentionally awkward to
+// discourage accidental production use.
+func EnableLoopbackForTesting() {
+	allowLoopbackForTests = true
+}
+
 // NewHTTPFetcher create a new HTTP remote wasm module fetcher.
 // requestTimeout is a timeout for each HTTP/HTTPS request.
 // requestMaxRetry is # of maximum retries of HTTP/HTTPS requests.
+//
+// The returned fetcher is SSRF-hardened: hostname resolution is checked
+// against a denylist of loopback, unspecified, link-local (including cloud
+// instance metadata at 169.254.169.254), multicast and broadcast addresses
+// before any TCP connect. The validated IP is the address the dialer
+// actually connects to, closing the DNS-rebinding window. Redirects are
+// capped at safehttp.DefaultMaxRedirects and each redirect target is
+// re-validated.
+//
+// RFC1918 / ULA / CGNAT private addresses are permitted because in-cluster
+// Wasm registries commonly live on ClusterIPs in those ranges. Pair with a
+// NetworkPolicy if stricter egress isolation is required.
 func NewHTTPFetcher(requestTimeout time.Duration, requestMaxRetry int, logger logging.Logger) *HTTPFetcher {
 	if requestTimeout == 0 {
 		requestTimeout = 5 * time.Second
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// nolint: gosec
-	// This is only when a user explicitly sets a flag to enable insecure mode
-	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
+	// insecure mode disables TLS server-cert verification but retains the
+	// SSRF dial-time host check. MinVersion is pinned so an insecure flag
+	// cannot also re-enable TLS 1.0.
+	insecureTransport := http.DefaultTransport.(*http.Transport).Clone()
+	insecureTransport.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: true, //nolint:gosec // only used when the operator explicitly enables the insecure registry list
+		MinVersion:         tls.VersionTLS12,
+	}
 	return &HTTPFetcher{
-		client: &http.Client{
-			Timeout: requestTimeout,
-		},
-		insecureClient: &http.Client{
-			Timeout:   requestTimeout,
-			Transport: transport,
-		},
+		client: safehttp.NewClient(safehttp.Options{
+			Timeout:       requestTimeout,
+			AllowPrivate:  true,
+			AllowLoopback: allowLoopbackForTests,
+		}),
+		insecureClient: safehttp.NewClient(safehttp.Options{
+			Timeout:       requestTimeout,
+			AllowPrivate:  true,
+			AllowLoopback: allowLoopbackForTests,
+			Transport:     insecureTransport,
+		}),
 		initialBackoff:  time.Millisecond * 500,
 		requestMaxRetry: requestMaxRetry,
 		logger:          logger,
@@ -173,6 +208,15 @@ func getFirstFileFromTar(b []byte) []byte {
 		return nil
 	}
 
+	// Reject obviously-hostile tar headers BEFORE allocating: h.Size is
+	// attacker-controlled and a 1<<60 entry would panic the controller via
+	// OOM at `make([]byte, h.Size)`. The LimitReader above only bounds the
+	// number of bytes the tar reader will subsequently *read*; it does not
+	// bound the up-front allocation.
+	if h.Size < 0 || h.Size > maxWasmSize {
+		return nil
+	}
+
 	ret := make([]byte, h.Size)
 	_, err = io.ReadFull(tr, ret)
 	if err != nil {
@@ -193,7 +237,10 @@ func getFileFromGZ(b []byte) []byte {
 		return nil
 	}
 
-	ret, err := io.ReadAll(zr)
+	// Cap the decompressed stream. The compressed input is already bounded
+	// to maxWasmSize, but a 256 MiB gzip can decompress to many TB; without
+	// this LimitReader a malicious server can OOM-kill the controller pod.
+	ret, err := io.ReadAll(io.LimitReader(zr, maxWasmSize))
 	if err != nil {
 		return nil
 	}

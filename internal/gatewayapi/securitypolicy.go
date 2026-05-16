@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/mail"
@@ -37,6 +38,7 @@ import (
 	"github.com/envoyproxy/gateway/internal/gatewayapi/status"
 	"github.com/envoyproxy/gateway/internal/ir"
 	"github.com/envoyproxy/gateway/internal/utils"
+	"github.com/envoyproxy/gateway/internal/utils/safehttp"
 )
 
 const (
@@ -1590,6 +1592,24 @@ func (t *Translator) fetchEndpointsFromIssuer(issuerURL string, providerTLS *ir.
 	return config, nil
 }
 
+// maxOIDCDiscoveryBodySize bounds the .well-known/openid-configuration
+// response size. The control plane decodes the document with no other size
+// guard, so a malicious or compromised issuer can otherwise stream
+// gigabytes of JSON and OOM the controller. 1 MiB is generous: real
+// discovery documents are typically ~2 KiB.
+const maxOIDCDiscoveryBodySize = 1 << 20
+
+// oidcAllowLoopbackForTests is flipped to true by tests so the SSRF guard
+// on the OIDC discovery client permits the localhost httptest servers used
+// for translator unit tests. Production paths must never call the helper.
+var oidcAllowLoopbackForTests bool
+
+// EnableOIDCLoopbackForTesting permits OIDC discovery to dial loopback
+// addresses. Intended ONLY for tests in this package and adjacent packages.
+func EnableOIDCLoopbackForTesting() {
+	oidcAllowLoopbackForTests = true
+}
+
 func discoverEndpointsFromIssuer(issuerURL string, providerTLS *ir.TLSUpstreamConfig) (*OpenIDConfig, error) {
 	var (
 		tlsConfig *tls.Config
@@ -1602,19 +1622,34 @@ func discoverEndpointsFromIssuer(issuerURL string, providerTLS *ir.TLSUpstreamCo
 		}
 	}
 
-	client := &http.Client{Timeout: defaultOIDCHTTPTimeout}
+	// Use an SSRF-hardened client. OIDC issuers are typically public
+	// services; we deny RFC1918/ULA private addresses by default so a
+	// SecurityPolicy author cannot redirect the control plane at
+	// in-cluster admin endpoints. Loopback / link-local (cloud IMDS) /
+	// unspecified / multicast are always blocked regardless.
+	var transport *http.Transport
 	if tlsConfig != nil {
-		client.Transport = &http.Transport{
-			TLSClientConfig: tlsConfig,
-		}
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+		transport.TLSClientConfig = tlsConfig
 	}
+	client := safehttp.NewClient(safehttp.Options{
+		Timeout:       defaultOIDCHTTPTimeout,
+		Transport:     transport,
+		AllowLoopback: oidcAllowLoopbackForTests,
+	})
 
 	// Parse the OpenID configuration response
 	var config OpenIDConfig
 	if err = backoff.Retry(func() error {
 		resp, err := client.Get(fmt.Sprintf("%s/.well-known/openid-configuration", issuerURL))
-		// Retry on transport errors
+		// Transport errors include SSRF rejections (ErrBlockedAddress) and
+		// resolution failures. These are not retryable in any useful sense
+		// — a rejected address won't suddenly become valid — but we let
+		// backoff handle retry classification.
 		if err != nil {
+			if errors.Is(err, safehttp.ErrBlockedAddress) {
+				return &backoff.PermanentError{Err: fmt.Errorf("issuer URL %q resolves to a blocked address: %w", issuerURL, err)}
+			}
 			return err
 		}
 
@@ -1627,8 +1662,17 @@ func discoverEndpointsFromIssuer(issuerURL string, providerTLS *ir.TLSUpstreamCo
 		case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusBadRequest:
 			return &backoff.PermanentError{Err: fmt.Errorf("failed fetching openid-configuration from issuer URL: %s, status code: %d", issuerURL, resp.StatusCode)}
 		case resp.StatusCode == http.StatusOK:
+			// Bound the decoded body size to prevent OOM via giant or
+			// gzip-bombed responses.
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxOIDCDiscoveryBodySize+1))
+			if readErr != nil {
+				return &backoff.PermanentError{Err: fmt.Errorf("error reading openid-configuration response from %s: %w", issuerURL, readErr)}
+			}
+			if int64(len(body)) > maxOIDCDiscoveryBodySize {
+				return &backoff.PermanentError{Err: fmt.Errorf("openid-configuration response from %s exceeds %d bytes", issuerURL, maxOIDCDiscoveryBodySize)}
+			}
 			// Do not retry if decoding fails
-			if err = json.NewDecoder(resp.Body).Decode(&config); err != nil {
+			if err = json.Unmarshal(body, &config); err != nil {
 				return &backoff.PermanentError{Err: fmt.Errorf("error decoding openid-configuration response: %w", err)}
 			}
 		default:
