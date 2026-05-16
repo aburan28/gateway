@@ -57,17 +57,34 @@ func (i *JWTAuthInterceptor) validateKubeJWT(ctx context.Context, token, nodeID 
 		return fmt.Errorf("token is not authenticated")
 	}
 
-	// Check if the node ID in the request matches the pod name in the token review response.
-	// This is used to prevent a client from accessing the xDS resource of another one.
-	if tokenReview.Status.User.Extra != nil {
-		podName := tokenReview.Status.User.Extra[serviceaccount.PodNameKey]
-		if podName[0] == "" {
-			return fmt.Errorf("pod name not found in token review response")
-		}
+	// Verify the TokenReview confirmed our requested audience. The Kubernetes API server only
+	// echoes audiences it actually accepted, so a missing audience here means the token was
+	// minted for a different audience and we must reject it.
+	if !slices.Contains(tokenReview.Status.Audiences, i.audience) {
+		return fmt.Errorf("token audience mismatch: expected %q to be present in %v", i.audience, tokenReview.Status.Audiences)
+	}
 
-		if podName[0] != nodeID {
-			return fmt.Errorf("pod name mismatch: expected %s, got %s", nodeID, podName[0])
-		}
+	// The node ID in the xDS request MUST match the pod name embedded in the service-account
+	// token. This binds an Envoy proxy's identity to its pod name and prevents one compromised
+	// proxy (or any holder of a service-account token) from fetching another proxy's xDS
+	// snapshot — which contains TLS private keys, OIDC client secrets, etc.
+	//
+	// The pod-binding claim is only populated for projected service-account tokens that were
+	// minted with a bound object reference (the standard for in-cluster pods on K8s >= 1.22).
+	// Legacy long-lived tokens or tokens minted with `kubectl create token` without
+	// --bound-object-ref do NOT have this claim. Refusing such tokens here is intentional:
+	// without the binding the interceptor cannot verify the requester is the proxy it claims
+	// to be, so any cluster service account passing the prior groups check would otherwise
+	// authenticate as any node.
+	if tokenReview.Status.User.Extra == nil {
+		return fmt.Errorf("token has no Extra claims; pod-binding claim required (use a projected service-account token with audience %q)", i.audience)
+	}
+	podName := tokenReview.Status.User.Extra[serviceaccount.PodNameKey]
+	if len(podName) == 0 || podName[0] == "" {
+		return fmt.Errorf("pod name not found in token review response (claim %q missing)", serviceaccount.PodNameKey)
+	}
+	if podName[0] != nodeID {
+		return fmt.Errorf("pod name mismatch: expected %s, got %s", nodeID, podName[0])
 	}
 
 	return nil

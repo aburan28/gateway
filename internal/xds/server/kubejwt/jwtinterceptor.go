@@ -20,14 +20,14 @@ import (
 
 // JWTAuthInterceptor verifies Kubernetes Service Account JWT tokens in gRPC requests.
 type JWTAuthInterceptor struct {
-	clientset *kubernetes.Clientset
+	clientset kubernetes.Interface
 	issuer    string
 	audience  string
 	logger    logging.Logger
 }
 
 // NewJWTAuthInterceptor initializes a new JWTAuthInterceptor.
-func NewJWTAuthInterceptor(logger logging.Logger, clientset *kubernetes.Clientset, issuer, audience string) *JWTAuthInterceptor {
+func NewJWTAuthInterceptor(logger logging.Logger, clientset kubernetes.Interface, issuer, audience string) *JWTAuthInterceptor {
 	return &JWTAuthInterceptor{
 		clientset: clientset,
 		issuer:    issuer,
