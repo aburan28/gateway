@@ -188,6 +188,8 @@ func (r *Runner) subscribeAndTranslate(sub <-chan watchable.Snapshot[string, *re
 					GatewayClassName:                gwapiv1.ObjectName(resources.GatewayClass.Name),
 					GlobalRateLimitEnabled:          r.EnvoyGateway.RateLimit != nil,
 					EnvoyPatchPolicyEnabled:         r.EnvoyGateway.ExtensionAPIs != nil && r.EnvoyGateway.ExtensionAPIs.EnableEnvoyPatchPolicy,
+					AllowedPatchPolicyNamespaces:    extensionAPIAllowedPatchPolicyNamespaces(r.EnvoyGateway.ExtensionAPIs),
+					AllowDangerousPatches:           r.EnvoyGateway.ExtensionAPIs != nil && r.EnvoyGateway.ExtensionAPIs.AllowDangerousPatches,
 					BackendEnabled:                  r.EnvoyGateway.ExtensionAPIs != nil && r.EnvoyGateway.ExtensionAPIs.EnableBackend,
 					ControllerNamespace:             r.ControllerNamespace,
 					GatewayNamespaceMode:            r.EnvoyGateway.GatewayNamespaceMode(),
@@ -782,4 +784,17 @@ func hmac(ctx context.Context, namespace string) ([]byte, error) {
 			"HMAC secret not found in secret %s/%s", namespace, hmacSecretName)
 	}
 	return hmac, err
+}
+
+// extensionAPIAllowedPatchPolicyNamespaces returns nil when the operator
+// has not configured a namespace allowlist (preserving the legacy "all
+// namespaces" behavior) and an explicit slice otherwise. Returning a
+// non-nil empty slice intentionally denies every namespace.
+func extensionAPIAllowedPatchPolicyNamespaces(ext *egv1a1.ExtensionAPISettings) []string {
+	if ext == nil || ext.AllowedPatchPolicyNamespaces == nil {
+		return nil
+	}
+	cp := make([]string, len(ext.AllowedPatchPolicyNamespaces))
+	copy(cp, ext.AllowedPatchPolicyNamespaces)
+	return cp
 }

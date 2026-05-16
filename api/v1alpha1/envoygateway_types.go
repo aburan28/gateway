@@ -303,7 +303,37 @@ type ExtensionAPISettings struct {
 	// Warning: Enabling `EnvoyPatchPolicy` may lead to complete security compromise of your system.
 	// Users with `EnvoyPatchPolicy` permissions can inject arbitrary configuration to proxies,
 	// leading to high Confidentiality, Integrity and Availability risks.
+	// Consider pairing this flag with `AllowedPatchPolicyNamespaces` and
+	// `AllowDangerousPatches=false` (the default) so that only namespaces
+	// you explicitly trust can author patch policies and so that patches
+	// touching TLS / SDS / auth filters are rejected by the translator.
 	EnableEnvoyPatchPolicy bool `json:"enableEnvoyPatchPolicy"`
+	// AllowedPatchPolicyNamespaces, when set, is the exhaustive list of
+	// namespaces from which EnvoyPatchPolicy resources will be honored.
+	// Patches authored in any other namespace are translated to a status
+	// error and never applied. When unset (nil), all namespaces are
+	// allowed for backwards compatibility with the pre-existing trust
+	// model — operators are strongly encouraged to populate this list when
+	// EnableEnvoyPatchPolicy is true.
+	//
+	// +optional
+	AllowedPatchPolicyNamespaces []string `json:"allowedPatchPolicyNamespaces,omitempty"`
+	// AllowDangerousPatches, when true, permits EnvoyPatchPolicy operations
+	// that target security-critical xDS fields: TLS certificates / SDS
+	// secrets, transport sockets, validation contexts, and the injection
+	// of `envoy.filters.http.lua` / `envoy.filters.http.wasm` /
+	// `envoy.filters.http.ext_authz` / `envoy.filters.http.ext_proc`
+	// filters that are not already present in the base configuration.
+	//
+	// Defaults to false. When false, patches that hit those fields are
+	// rejected at translation time and a status condition surfaces the
+	// reason. Setting this to true returns the legacy behavior (no
+	// field-level guardrails) and is intended only for cluster operators
+	// who have established alternate controls (admission policy, GitOps
+	// review).
+	//
+	// +optional
+	AllowDangerousPatches bool `json:"allowDangerousPatches,omitempty"`
 	// EnableBackend enables Envoy Gateway to
 	// reconcile and implement the Backend resources.
 	EnableBackend bool `json:"enableBackend"`

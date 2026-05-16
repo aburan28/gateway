@@ -94,6 +94,16 @@ type Translator struct {
 	// feature is enabled.
 	EnvoyPatchPolicyEnabled bool
 
+	// AllowedPatchPolicyNamespaces, when non-nil, is the exhaustive list
+	// of namespaces from which EnvoyPatchPolicy resources will be honored.
+	// nil means "no namespace restriction".
+	AllowedPatchPolicyNamespaces []string
+
+	// AllowDangerousPatches, when true, disables the field-level deny-list
+	// that rejects EnvoyPatchPolicy operations targeting TLS / SDS /
+	// transport_socket / auth-filter injection points. Defaults to false.
+	AllowDangerousPatches bool
+
 	// LuaEnvoyExtensionPolicyDisabled when the Lua EnvoyExtensionPolicy feature is disabled.
 	LuaEnvoyExtensionPolicyDisabled bool
 
