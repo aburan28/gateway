@@ -1,0 +1,75 @@
+# Default values for traffic-harvester.
+
+# -- Install CRDs with the chart
+installCRDs: true
+
+hub:
+  # -- Enable the hub controller
+  enabled: true
+  image:
+    repository: traffic-harvester/hub
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  serviceAccount:
+    # -- Create a ServiceAccount for the hub
+    create: true
+    # -- Annotations for the hub ServiceAccount
+    annotations: {}
+  service:
+    type: ClusterIP
+    port: 9443
+  tls:
+    # -- Name of the TLS secret for the hub gRPC server
+    secretName: ""
+    # -- Namespace of the TLS secret
+    secretNamespace: ""
+  # -- Node selector for hub pods
+  nodeSelector: {}
+  # -- Tolerations for hub pods
+  tolerations: []
+
+spoke:
+  # -- Enable the spoke controller
+  enabled: true
+  image:
+    repository: traffic-harvester/spoke
+    tag: "dev"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  resources:
+    limits:
+      cpu: 500m
+      memory: 256Mi
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  serviceAccount:
+    # -- Create a ServiceAccount for the spoke
+    create: true
+    # -- Annotations for the spoke ServiceAccount
+    annotations: {}
+  hub:
+    # -- gRPC address of the hub (e.g. hub-service.capture-system.svc:9443)
+    address: ""
+  # -- Node selector for spoke pods
+  nodeSelector: {}
+  # -- Tolerations for spoke pods
+  tolerations: []
+
+agent:
+  image:
+    repository: traffic-harvester/agent
+    tag: "dev"
+    pullPolicy: IfNotPresent
+
+# -- Namespace to deploy into (defaults to Release.Namespace)
+namespace: ""
+
